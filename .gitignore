@@ -26,3 +26,8 @@ poetry.lock
 botpy.log
 tests/
 .nanobot/
+.next/
+node_modules/
+bridge/node_modules/
+dist/
+env/

@@ -1,40 +1,26 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM python:3.11-slim
 
-# Install Node.js 20 for the WhatsApp bridge
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg git && \
-    mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get purge -y gnupg && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# System deps for Playwright + sentence-transformers
+RUN apt-get update && apt-get install -y \
+    gcc g++ curl git \
+    libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
+    libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 \
+    libasound2 libpangocairo-1.0-0 libgtk-3-0 libx11-xcb1 \
+    wget fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies first (cached layer)
-COPY pyproject.toml README.md LICENSE ./
-RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
-    uv pip install --system --no-cache . && \
-    rm -rf nanobot bridge
+# Install Python deps first (layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the full source and install
-COPY nanobot/ nanobot/
-COPY bridge/ bridge/
-RUN uv pip install --system --no-cache .
+# Install Playwright browsers
+RUN playwright install chromium --with-deps
 
-# Build the WhatsApp bridge
-WORKDIR /app/bridge
-RUN npm install && npm run build
-WORKDIR /app
+# Copy source
+COPY . .
 
-# Create config directory
-RUN mkdir -p /root/.nanobot
+EXPOSE 8765
 
-# Gateway default port
-EXPOSE 18790
-
-ENTRYPOINT ["nanobot"]
-CMD ["status"]
+CMD ["python", "run.py"]

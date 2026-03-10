@@ -5,6 +5,7 @@ Starts the FastAPI WebSocket server + Agent Loop together
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -21,12 +22,14 @@ from nanobot.session.manager import SessionManager
 
 def get_config_path() -> Path:
     """Get the default configuration file path."""
-    return Path.home() / ".personal-agent" / "config.json"
+    workspace_base = os.environ.get("NANOBOT_WORKSPACE", str(Path.home() / ".personal-agent"))
+    return Path(workspace_base) / "config.json"
 
 
 def get_workspace_path() -> Path:
     """Get the default workspace path."""
-    return Path.home() / ".personal-agent" / "workspace"
+    workspace_base = os.environ.get("NANOBOT_WORKSPACE", str(Path.home() / ".personal-agent"))
+    return Path(workspace_base) / "workspace"
 
 
 def load_config(config_path: Path | None = None) -> dict:
@@ -160,27 +163,50 @@ class Application:
             try:
                 msg = await self.message_bus.consume_outbound()
                 user_id = msg.chat_id
-                
-                # Skip progress messages - only send final responses
-                if msg.metadata and msg.metadata.get("_progress"):
+
+                # Check if this is a tool hint message (tool_start/tool_done/plan)
+                is_tool_hint = msg.metadata and msg.metadata.get("_tool_hint")
+
+                # Skip regular progress messages, but allow tool hints through
+                if msg.metadata and msg.metadata.get("_progress") and not is_tool_hint:
                     logger.debug(f"Skipping progress message for {user_id}")
                     continue
-                
+
                 logger.debug(f"Routing outbound to {user_id}, channel={msg.channel}")
-                
+
                 # Route to web channel if applicable
                 if msg.channel == "web" and self._server:
-                    # Check if this is a file notification
-                    msg_type = "response"
-                    if msg.metadata and msg.metadata.get("type") == "file":
-                        msg_type = "file"
-                    
-                    await self._server.channel.send_message(
-                        user_id=user_id,
-                        content=msg.content,
-                        msg_type=msg_type,
-                        metadata=msg.metadata,
-                    )
+                    # For tool hints, send the content as-is (it's already JSON)
+                    if is_tool_hint:
+                        # Parse JSON content and send directly
+                        try:
+                            tool_data = json.loads(msg.content)
+                            await self._server.channel.send_message(
+                                user_id=user_id,
+                                content=msg.content,
+                                msg_type=tool_data.get("type", "message"),
+                                metadata=msg.metadata,
+                            )
+                        except json.JSONDecodeError:
+                            # Fallback if JSON parsing fails
+                            await self._server.channel.send_message(
+                                user_id=user_id,
+                                content=msg.content,
+                                msg_type="message",
+                                metadata=msg.metadata,
+                            )
+                    else:
+                        # Check if this is a file notification
+                        msg_type = "response"
+                        if msg.metadata and msg.metadata.get("type") == "file":
+                            msg_type = "file"
+
+                        await self._server.channel.send_message(
+                            user_id=user_id,
+                            content=msg.content,
+                            msg_type=msg_type,
+                            metadata=msg.metadata,
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:

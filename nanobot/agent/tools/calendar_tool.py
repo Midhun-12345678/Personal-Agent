@@ -189,17 +189,27 @@ class CalendarTool(Tool):
 
         # Validate ISO format
         try:
-            datetime.fromisoformat(start.replace("Z", "+00:00"))
-            datetime.fromisoformat(end.replace("Z", "+00:00"))
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
         except ValueError as e:
             return json.dumps({"error": f"Invalid datetime format: {e}"})
+
+        # Check for time conflicts
+        conflict = await self._check_time_conflict(service, start, end)
+        if conflict:
+            return json.dumps({
+                "conflict": True,
+                "error": f"CONFLICT: You already have \"{conflict['title']}\" from {conflict['start']} to {conflict['end']}.",
+                "message": "This event overlaps with an existing event. Please choose a different time or confirm to create anyway.",
+                "conflicting_event": conflict
+            }, indent=2)
 
         event = {
             "summary": title,
             "start": {"dateTime": start, "timeZone": "UTC"},
             "end": {"dateTime": end, "timeZone": "UTC"},
         }
-        
+
         if description:
             event["description"] = description
         if location:
@@ -216,6 +226,46 @@ class CalendarTool(Tool):
             "link": result.get("htmlLink", ""),
             "message": f"Event '{title}' created successfully"
         }, indent=2)
+
+    async def _check_time_conflict(self, service, start: str, end: str) -> dict | None:
+        """
+        Check if the proposed time conflicts with existing calendar events.
+
+        Args:
+            service: The Google Calendar service
+            start: ISO format start time
+            end: ISO format end time
+
+        Returns:
+            Dict with conflicting event details if found, None otherwise
+        """
+        try:
+            # Query for events in the same time window
+            events_result = service.events().list(
+                calendarId="primary",
+                timeMin=start,
+                timeMax=end,
+                singleEvents=True,
+                orderBy="startTime"
+            ).execute()
+
+            events = events_result.get("items", [])
+
+            if events:
+                # Return the first conflicting event
+                event = events[0]
+                return {
+                    "id": event.get("id"),
+                    "title": event.get("summary", "(No title)"),
+                    "start": event["start"].get("dateTime", event["start"].get("date")),
+                    "end": event["end"].get("dateTime", event["end"].get("date")),
+                }
+
+            return None
+
+        except Exception as e:
+            logger.error("Error checking calendar conflicts: {}", e)
+            return None
 
     async def _delete_event(self, service, event_id: str = "", **kwargs) -> str:
         """Delete a calendar event."""

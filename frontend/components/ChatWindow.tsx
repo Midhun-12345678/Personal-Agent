@@ -4,7 +4,9 @@ import { useEffect, useRef } from 'react'
 import { Message } from '@/app/chat/page'
 import MessageBubble from './MessageBubble'
 import InputBar from './InputBar'
+import ToolCallIndicator from './ToolCallIndicator'
 import { Bot, Wifi, WifiOff } from 'lucide-react'
+import { ToolEvent, PlanEvent } from '@/lib/websocket'
 
 interface ChatWindowProps {
   messages: Message[]
@@ -12,6 +14,9 @@ interface ChatWindowProps {
   isConnected: boolean
   userName: string
   onSendMessage: (content: string) => void
+  activeToolCall?: ToolEvent | null
+  completedTools?: ToolEvent[]
+  currentPlan?: PlanEvent | null
 }
 
 export default function ChatWindow({
@@ -20,6 +25,9 @@ export default function ChatWindow({
   isConnected,
   userName,
   onSendMessage,
+  activeToolCall = null,
+  completedTools = [],
+  currentPlan = null,
 }: ChatWindowProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -88,6 +96,13 @@ export default function ChatWindow({
 
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Tool Call Indicator */}
+      <ToolCallIndicator
+        activeToolCall={activeToolCall}
+        completedTools={completedTools}
+        currentPlan={currentPlan}
+      />
 
       {/* Input */}
       <InputBar onSend={onSendMessage} disabled={!isConnected} />

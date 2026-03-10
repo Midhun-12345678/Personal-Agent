@@ -18,14 +18,24 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, user_id: str = "default"):
         self.workspace = workspace
+        self.user_id = user_id
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+        # Initialize semantic memory store for preference injection
+        from nanobot.memory.store import UserMemoryStore
+        self.semantic_memory = UserMemoryStore(user_id, workspace.parent)
+
+    async def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
+
+        # Inject user preferences from ChromaDB before bootstrap files
+        preferences_context = await self._get_preferences_context()
+        if preferences_context:
+            parts.append(preferences_context)
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
@@ -51,6 +61,43 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
+
+    async def _get_preferences_context(self) -> str | None:
+        """Query ChromaDB for user preferences and build awareness string.
+
+        Returns:
+            Short preference awareness string (max 2 sentences, under 80 tokens), or None
+        """
+        try:
+            # Query for preference category
+            results = await self.semantic_memory.search("user preferences likes dislikes", top_k=3)
+
+            # Filter for preference category only
+            preferences = [
+                r["text"] for r in results
+                if r.get("category") == "preference" and r.get("score", 0) > 0.3
+            ]
+
+            if not preferences:
+                return None
+
+            # Build short awareness string (max 2 sentences, under 80 tokens)
+            if len(preferences) == 1:
+                pref_text = preferences[0]
+            elif len(preferences) == 2:
+                pref_text = f"{preferences[0]}, {preferences[1]}"
+            else:
+                pref_text = f"{preferences[0]}, {preferences[1]}, {preferences[2]}"
+
+            # Truncate if too long (aim for ~80 tokens = ~320 chars)
+            if len(pref_text) > 300:
+                pref_text = pref_text[:297] + "..."
+
+            return f"🧠 Known preferences: {pref_text}"
+
+        except Exception:
+            # Silently fail - preferences are optional
+            return None
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
@@ -113,7 +160,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return "\n\n".join(parts) if parts else ""
 
-    def build_messages(
+    async def build_messages(
         self,
         history: list[dict[str, Any]],
         current_message: str,
@@ -133,8 +180,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        # Build system prompt asynchronously to allow preference injection
+        system_prompt = await self.build_system_prompt(skill_names)
+
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": merged},
         ]

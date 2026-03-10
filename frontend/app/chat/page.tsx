@@ -19,6 +19,12 @@ export interface Message {
   download_url?: string
 }
 
+interface UsageStats {
+  tasks_completed: number
+  tasks_failed: number
+  estimated_time_saved_minutes: number
+}
+
 export default function ChatPage() {
   const router = useRouter()
   
@@ -32,6 +38,7 @@ export default function ChatPage() {
   const [isClient, setIsClient] = useState(false)
   const [token, setToken] = useState<string | null>(null)
   const [userName, setUserName] = useState<string | null>(null)
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null)
 
   // Client-side initialization - load localStorage data
   useEffect(() => {
@@ -71,10 +78,10 @@ export default function ChatPage() {
     }
   }, [messages, isClient])
 
-  const { sendMessage, isConnected } = useWebSocket({
+  const { sendMessage, isConnected, activeToolCall, completedTools, currentPlan } = useWebSocket({
     token: token || '',
     onMessage: (data) => {
-      if (data.type === 'response' || data.type === 'file') {
+      if (data.type === 'response' || data.type === 'message' || data.type === 'file') {
         setIsTyping(false)
         const assistantMessage: Message = {
           id: crypto.randomUUID(),
@@ -118,11 +125,37 @@ export default function ChatPage() {
 
   useEffect(() => {
     checkIntegrations()
-    
+
     const handleFocus = () => checkIntegrations()
     window.addEventListener('focus', handleFocus)
     return () => window.removeEventListener('focus', handleFocus)
   }, [checkIntegrations])
+
+  // Fetch usage stats
+  const fetchUsageStats = useCallback(async () => {
+    if (!token) return
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8765'
+    try {
+      const response = await fetch(`${apiUrl}/dashboard/summary?days=1&token=${token}`)
+      if (response.ok) {
+        const data = await response.json()
+        // Only set stats if there are actual tasks
+        if (data.tasks_completed > 0 || data.tasks_failed > 0) {
+          setUsageStats(data)
+        } else {
+          setUsageStats(null)
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch usage stats:', error)
+    }
+  }, [token])
+
+  useEffect(() => {
+    fetchUsageStats()
+    const interval = setInterval(fetchUsageStats, 60000) // Refresh every 60 seconds
+    return () => clearInterval(interval)
+  }, [fetchUsageStats])
 
   const handleSendMessage = (content: string) => {
     // Handle /new command - clear chat locally
@@ -181,6 +214,16 @@ export default function ChatPage() {
           />
         )}
 
+        {/* Usage stats bar */}
+        {usageStats && (
+          <div className="text-xs text-gray-400 text-center py-2 border-b border-gray-800">
+            📊 Today: {usageStats.tasks_completed + usageStats.tasks_failed} tasks ·
+            ⏱️ ~{usageStats.estimated_time_saved_minutes} min saved ·
+            ✅ {usageStats.tasks_completed} ·
+            ❌ {usageStats.tasks_failed}
+          </div>
+        )}
+
         {/* Chat window */}
         <ChatWindow
           messages={messages}
@@ -188,6 +231,9 @@ export default function ChatPage() {
           isConnected={isConnected}
           userName={userName || 'User'}
           onSendMessage={handleSendMessage}
+          activeToolCall={activeToolCall}
+          completedTools={completedTools}
+          currentPlan={currentPlan}
         />
       </div>
 

@@ -320,6 +320,50 @@ class WebServer:
                 media_type="application/octet-stream"
             )
 
+        # ------------------------------------------------------------------
+        # Usage Dashboard Routes
+        # ------------------------------------------------------------------
+
+        @self.app.get("/dashboard")
+        async def get_dashboard(token: str = Query(...)):
+            """Get usage dashboard for the authenticated user."""
+            user_ctx = self._auth_manager.authenticate(token)
+            if not user_ctx:
+                raise HTTPException(status_code=401, detail="Invalid token")
+
+            try:
+                from ..agent.usage_logger import UsageLogger
+
+                usage_logger = UsageLogger(self.workspace, user_ctx.user_id)
+                summary = usage_logger.get_summary(days=7)
+                dashboard = usage_logger.format_dashboard(summary)
+
+                return {"dashboard": dashboard, "summary": summary}
+            except Exception as e:
+                logger.error(f"Dashboard error: {e}")
+                return {"dashboard": "Stats unavailable", "summary": {}}
+
+        @self.app.get("/dashboard/summary")
+        async def get_dashboard_summary(
+            token: str = Query(...),
+            days: int = Query(7, ge=1, le=90)
+        ):
+            """Get usage summary statistics for the authenticated user."""
+            user_ctx = self._auth_manager.authenticate(token)
+            if not user_ctx:
+                raise HTTPException(status_code=401, detail="Invalid token")
+
+            try:
+                from ..agent.usage_logger import UsageLogger
+
+                usage_logger = UsageLogger(self.workspace, user_ctx.user_id)
+                summary = usage_logger.get_summary(days=days)
+
+                return summary
+            except Exception as e:
+                logger.error(f"Dashboard summary error: {e}")
+                return {}
+
     @property
     def channel(self) -> WebChannel:
         """Get the web channel instance."""

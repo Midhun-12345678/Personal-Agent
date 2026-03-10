@@ -1,31 +1,58 @@
-x-common-config: &common-config
-  build:
-    context: .
-    dockerfile: Dockerfile
-  volumes:
-    - ~/.nanobot:/root/.nanobot
+version: '3.8'
 
 services:
-  nanobot-gateway:
-    container_name: nanobot-gateway
-    <<: *common-config
-    command: ["gateway"]
-    restart: unless-stopped
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - 18790:18790
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 256M
-  
-  nanobot-cli:
-    <<: *common-config
-    profiles:
-      - cli
-    command: ["status"]
-    stdin_open: true
-    tty: true
+      - "8765:8765"
+    volumes:
+      - ${HOME}/.personal-agent:/root/.personal-agent
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - nanobot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://backend:8765
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8765
+    restart: unless-stopped
+    networks:
+      - nanobot-net
+
+  bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - BACKEND_WS_URL=ws://backend:8765
+    restart: unless-stopped
+    networks:
+      - nanobot-net
+
+networks:
+  nanobot-net:
+    driver: bridge

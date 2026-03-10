@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -13,8 +14,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.error_recovery import ErrorRecovery
+from nanobot.agent.intent_classifier import IntentClassifier
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.pending_action import PendingAction
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.task_planner import TaskPlanner
+from nanobot.agent.usage_logger import UsageLogger
 from nanobot.memory import UserMemoryStore, MemoryExtractor
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -27,6 +33,7 @@ from nanobot.agent.tools.gmail_tool import GmailTool
 from nanobot.agent.tools.calendar_tool import CalendarTool
 from nanobot.agent.tools.browser_tool import BrowserTool
 from nanobot.agent.tools.notify_file import NotifyFileTool
+from nanobot.agent.tools.memory_tool import MemoryTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
@@ -109,7 +116,7 @@ What can I help you with today?"""
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(workspace, user_id=user_id)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -143,6 +150,21 @@ What can I help you with today?"""
         self.semantic_memory = UserMemoryStore(user_id, workspace.parent)
         self.memory_extractor = MemoryExtractor(provider, model=self.model)
 
+        # Intent classification and confirmation tracking
+        self.intent_classifier = IntentClassifier()
+        self._pending_confirmations: dict[str, PendingAction] = {}  # session_key -> PendingAction
+        self._expiry_check_task: asyncio.Task | None = None
+
+        # Error recovery for tool execution failures
+        self.error_recovery = ErrorRecovery()
+
+        # Usage logging for dashboard
+        self.usage_logger = UsageLogger(self.workspace.parent.parent, self.user_id)
+
+        # Task planning for complex multi-step tasks
+        self._current_plan: dict[str, list[dict]] = {}  # session_key -> plan steps
+        self._tool_results: dict[str, list[dict]] = {}  # session_key -> tool results with metadata
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -171,6 +193,7 @@ What can I help you with today?"""
             send_callback=self.bus.publish_outbound,
             user_id=self.user_id,
         ))
+        self.tools.register(MemoryTool(user_id=self.user_id, workspace=self.workspace))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -201,6 +224,17 @@ What can I help you with today?"""
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
 
+    def _make_bus_progress(self, msg: InboundMessage) -> Callable[..., Awaitable[None]]:
+        """Create a progress callback that publishes to the message bus."""
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_progress"] = True
+            meta["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+            ))
+        return _bus_progress
+
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -219,10 +253,55 @@ What can I help you with today?"""
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _get_tool_description(self, tool_name: str, tool_args: dict) -> str:
+        """Generate a user-friendly description of a tool call."""
+        if tool_name == "gmail":
+            action = tool_args.get("action", "")
+            if action == "send":
+                to = tool_args.get("to", "...")
+                return f"Sending email to {to}"
+            elif action == "read":
+                return "Reading emails"
+            return "Using Gmail"
+
+        elif tool_name == "calendar":
+            action = tool_args.get("action", "")
+            if action == "create":
+                summary = tool_args.get("summary", "event")
+                return f"Creating event: {summary}"
+            elif action == "list":
+                return "Checking calendar"
+            return "Using Calendar"
+
+        elif tool_name == "write_file":
+            path = tool_args.get("path", "file")
+            return f"Writing {path}"
+
+        elif tool_name == "read_file":
+            path = tool_args.get("path", "file")
+            return f"Reading {path}"
+
+        elif tool_name == "web_search":
+            query = str(tool_args.get("query", "..."))[:30]
+            return f"Searching: {query}"
+
+        elif tool_name == "exec":
+            command = str(tool_args.get("command", ""))[:30]
+            return f"Running: {command}"
+
+        elif tool_name == "memory":
+            action = tool_args.get("action", "access")
+            return f"Memory: {action}"
+
+        else:
+            return f"Using {tool_name}"
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        session_key: str | None = None,
+        user_message: str = "",
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
@@ -275,7 +354,178 @@ What can I help you with today?"""
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+
+                    # Intent classification - check if confirmation is needed
+                    classification = self.intent_classifier.classify(
+                        user_message, tool_call.name, tool_call.arguments
+                    )
+                    logger.debug(f"Intent classification for {tool_call.name}: {classification}")
+
+                    if self.intent_classifier.requires_confirmation(classification):
+                        # Store pending tool call and pause execution
+                        if session_key:
+                            base_confirmation_msg = self.intent_classifier.get_confirmation_message(
+                                tool_call.name, tool_call.arguments
+                            )
+
+                            pending_action = PendingAction(
+                                tool_name=tool_call.name,
+                                tool_args=tool_call.arguments,
+                                tool_call=tool_call,
+                                messages=messages,
+                                iteration=iteration,
+                                tools_used=tools_used,
+                                auto_confirm_seconds=30,
+                            )
+
+                            self._pending_confirmations[session_key] = pending_action
+
+                            # Format confirmation message with timer
+                            confirmation_msg = pending_action.format_confirmation_message(
+                                base_confirmation_msg
+                            )
+
+                            # Return early with confirmation message
+                            return confirmation_msg, tools_used, messages
+                        else:
+                            # No session key means we can't get confirmation, log warning and proceed
+                            logger.warning(
+                                f"Tool {tool_call.name} requires confirmation but no session_key provided, executing anyway"
+                            )
+
+                    # Send tool_start event
+                    if on_progress:
+                        await on_progress(json.dumps({
+                            "type": "tool_start",
+                            "tool": tool_call.name,
+                            "description": self._get_tool_description(tool_call.name, tool_call.arguments)
+                        }), tool_hint=True)
+
+                    # Execute tool with error recovery and retry logic
+                    result = None
+                    result_metadata = {}
+                    retry_attempt = 0
+                    max_retries = 3
+
+                    while retry_attempt < max_retries:
+                        try:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                            result_metadata = {
+                                "success": True,
+                                "tool": tool_call.name,
+                                "attempts": retry_attempt + 1
+                            }
+                            break  # Success, exit retry loop
+
+                        except Exception as e:
+                            error_message = str(e)
+                            logger.warning(
+                                f"Tool {tool_call.name} failed (attempt {retry_attempt + 1}/{max_retries}): {error_message}"
+                            )
+
+                            # Classify error type
+                            error_type = self.error_recovery.classify_error(
+                                error_message, tool_call.name
+                            )
+
+                            # Get recovery action
+                            recovery_action = self.error_recovery.get_recovery_action(
+                                error_type, tool_call.name, tool_call.arguments, retry_attempt + 1
+                            )
+
+                            # Handle recovery action
+                            if recovery_action["action"] == "retry":
+                                retry_attempt += 1
+                                if retry_attempt < max_retries:
+                                    # Send progress message about retry
+                                    if on_progress:
+                                        await on_progress(recovery_action["message"], tool_hint=True)
+
+                                    # Wait before retry
+                                    await asyncio.sleep(recovery_action["delay"])
+                                    continue
+                                else:
+                                    # Max retries reached
+                                    result = self.error_recovery.format_fatal_error(
+                                        error_message, tool_call.name
+                                    )
+                                    result_metadata = {
+                                        "success": False,
+                                        "error": error_message,
+                                        "error_type": error_type,
+                                        "tool": tool_call.name,
+                                        "attempts": retry_attempt + 1
+                                    }
+                                    break
+
+                            elif recovery_action["action"] == "suggest_alternatives":
+                                # For calendar conflicts, suggest alternatives
+                                if tool_call.name == "calendar" and "start" in tool_call.arguments:
+                                    alternatives = self.error_recovery.suggest_alternative_times(
+                                        tool_call.arguments.get("start", ""),
+                                        tool_call.arguments.get("end", ""),
+                                        duration_minutes=30
+                                    )
+
+                                    alt_text = "\n".join([
+                                        f"  • {alt['display']}"
+                                        for alt in alternatives[:3]
+                                    ])
+                                    result = f"{recovery_action['message']}\n\nAlternatives:\n{alt_text}"
+                                else:
+                                    result = recovery_action["message"]
+
+                                result_metadata = {
+                                    "success": False,
+                                    "error": error_message,
+                                    "error_type": error_type,
+                                    "tool": tool_call.name,
+                                    "alternatives_suggested": True
+                                }
+                                break
+
+                            elif recovery_action["action"] == "notify":
+                                # Just notify user about the issue
+                                result = recovery_action["message"]
+                                result_metadata = {
+                                    "success": False,
+                                    "error": error_message,
+                                    "error_type": error_type,
+                                    "tool": tool_call.name
+                                }
+                                break
+
+                            else:  # abort
+                                # Fatal error
+                                result = self.error_recovery.format_fatal_error(
+                                    error_message, tool_call.name
+                                )
+                                result_metadata = {
+                                    "success": False,
+                                    "error": error_message,
+                                    "error_type": error_type,
+                                    "tool": tool_call.name,
+                                    "fatal": True
+                                }
+                                break
+
+                    # Track tool results for task completion summary
+                    if session_key:
+                        if session_key not in self._tool_results:
+                            self._tool_results[session_key] = []
+                        self._tool_results[session_key].append({
+                            "result": result,
+                            "metadata": result_metadata
+                        })
+
+                    # Send tool_done event
+                    if on_progress:
+                        await on_progress(json.dumps({
+                            "type": "tool_done",
+                            "tool": tool_call.name,
+                            "description": self._get_tool_description(tool_call.name, tool_call.arguments) + " ✓"
+                        }), tool_hint=True)
+
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -308,6 +558,9 @@ What can I help you with today?"""
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
+
+        # Start background task for checking expired confirmations
+        self._expiry_check_task = asyncio.create_task(self._check_expired_confirmations())
 
         while self._running:
             try:
@@ -342,6 +595,119 @@ What can I help you with today?"""
         """Process a message under the global lock."""
         async with self._processing_lock:
             try:
+                # Check for pending confirmation BEFORE processing the message
+                session_key = msg.session_key
+
+                if session_key in self._pending_confirmations:
+                    pending = self._pending_confirmations[session_key]
+                    user_response = msg.content.strip().lower()
+
+                    # Check if the pending action has expired
+                    if pending.is_expired():
+                        # Auto-execute the tool
+                        logger.info("Auto-confirming expired action for session {}", session_key)
+
+                        tool_call = pending.tool_call
+                        messages = pending.messages
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info("Auto-executing tool: {}({})", tool_call.name, args_str[:200])
+
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+
+                        # Continue the agent loop
+                        session = self.sessions.get_or_create(session_key)
+                        final_content, _, all_msgs = await self._run_agent_loop(
+                            messages,
+                            on_progress=self._make_bus_progress(msg),
+                            session_key=session_key,
+                            user_message=msg.content,
+                        )
+
+                        if final_content is None:
+                            final_content = "I've completed processing but have no response to give."
+
+                        self._save_turn(session, all_msgs, 1 + len(session.get_history(max_messages=self.memory_window)))
+                        self.sessions.save(session)
+
+                        # Clear the pending confirmation
+                        del self._pending_confirmations[session_key]
+
+                        # Send the auto-confirmation notification + result
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"⏱️ Auto-confirmed and executed.\n\n{final_content}",
+                            metadata=msg.metadata or {},
+                        ))
+                        return
+
+                    # Check for user confirmation
+                    if user_response in ["yes", "y", "confirm", "ok"]:
+                        # User confirmed - execute the tool
+                        logger.info("User confirmed action for session {}", session_key)
+
+                        tool_call = pending.tool_call
+                        messages = pending.messages
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info("Executing confirmed tool: {}({})", tool_call.name, args_str[:200])
+
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+
+                        # Continue the agent loop
+                        session = self.sessions.get_or_create(session_key)
+                        final_content, _, all_msgs = await self._run_agent_loop(
+                            messages,
+                            on_progress=self._make_bus_progress(msg),
+                            session_key=session_key,
+                            user_message=msg.content,
+                        )
+
+                        if final_content is None:
+                            final_content = "I've completed processing but have no response to give."
+
+                        self._save_turn(session, all_msgs, 1 + len(session.get_history(max_messages=self.memory_window)))
+                        self.sessions.save(session)
+
+                        # Clear the pending confirmation
+                        del self._pending_confirmations[session_key]
+
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=final_content,
+                            metadata=msg.metadata or {},
+                        ))
+                        return
+
+                    elif user_response in ["no", "n", "cancel", "abort"]:
+                        # User cancelled - abort the action
+                        logger.info("User cancelled action for session {}", session_key)
+
+                        # Clear the pending confirmation
+                        del self._pending_confirmations[session_key]
+
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content="❌ Action cancelled.",
+                            metadata=msg.metadata or {},
+                        ))
+                        return
+
+                    else:
+                        # Invalid response - remind user
+                        seconds_remaining = pending.seconds_remaining()
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"Please reply YES to confirm or NO to cancel. ⏱️ {seconds_remaining} seconds remaining.",
+                            metadata=msg.metadata or {},
+                        ))
+                        return
+
+                # No pending confirmation - proceed with normal message processing
                 response = await self._process_message(msg)
                 if response is not None:
                     await self.bus.publish_outbound(response)
@@ -372,7 +738,84 @@ What can I help you with today?"""
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        if self._expiry_check_task and not self._expiry_check_task.done():
+            self._expiry_check_task.cancel()
         logger.info("Agent loop stopping")
+
+    async def _check_expired_confirmations(self) -> None:
+        """
+        Background task that periodically checks for expired pending confirmations
+        and auto-executes them.
+        """
+        logger.info("Started background task for checking expired confirmations")
+
+        while self._running:
+            try:
+                await asyncio.sleep(5)  # Check every 5 seconds
+
+                # Get a snapshot of pending confirmations to avoid dict modification during iteration
+                pending_items = list(self._pending_confirmations.items())
+
+                for session_key, pending in pending_items:
+                    if pending.is_expired():
+                        logger.info("Auto-confirming expired action for session {}", session_key)
+
+                        # Execute the tool
+                        tool_call = pending.tool_call
+                        args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                        logger.info("Auto-executing tool: {}({})", tool_call.name, args_str[:200])
+
+                        try:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                            messages = self.context.add_tool_result(
+                                pending.messages, tool_call.id, tool_call.name, result
+                            )
+
+                            # Continue the agent loop
+                            session = self.sessions.get_or_create(session_key)
+                            final_content, _, all_msgs = await self._run_agent_loop(
+                                messages,
+                                session_key=session_key,
+                                user_message="",
+                            )
+
+                            if final_content is None:
+                                final_content = "I've completed processing but have no response to give."
+
+                            self._save_turn(session, all_msgs, 1 + len(session.get_history(max_messages=self.memory_window)))
+                            self.sessions.save(session)
+
+                            # Parse channel and chat_id from session_key (format: "channel:chat_id")
+                            channel, chat_id = session_key.split(":", 1) if ":" in session_key else ("cli", session_key)
+
+                            # Send notification to user
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=channel, chat_id=chat_id,
+                                content=f"⏱️ Auto-confirmed and executed.\n\n{final_content}",
+                            ))
+
+                        except Exception as e:
+                            logger.error("Error auto-executing expired confirmation: {}", e)
+                            # Parse channel and chat_id from session_key
+                            channel, chat_id = session_key.split(":", 1) if ":" in session_key else ("cli", session_key)
+
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=channel, chat_id=chat_id,
+                                content=f"⏱️ Auto-confirmation failed: {str(e)}",
+                            ))
+
+                        finally:
+                            # Clear the pending confirmation
+                            if session_key in self._pending_confirmations:
+                                del self._pending_confirmations[session_key]
+
+            except asyncio.CancelledError:
+                logger.info("Expired confirmations check task cancelled")
+                break
+            except Exception as e:
+                logger.error("Error in expired confirmations check task: {}", e)
+
+        logger.info("Stopped background task for checking expired confirmations")
 
     async def _process_message(
         self,
@@ -381,6 +824,9 @@ What can I help you with today?"""
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        # Track task duration for usage logging
+        start_time = time.monotonic()
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -390,11 +836,13 @@ What can I help you with today?"""
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
-            messages = self.context.build_messages(
+            messages = await self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs = await self._run_agent_loop(
+                messages, session_key=key, user_message=msg.content
+            )
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -494,12 +942,47 @@ What can I help you with today?"""
         if semantic_context:
             current_message = f"{semantic_context}\n\n{msg.content}"
 
-        initial_messages = self.context.build_messages(
+        initial_messages = await self.context.build_messages(
             history=history,
             current_message=current_message,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+
+        # Task planning for complex multi-step tasks
+        task_planner = TaskPlanner()
+        if task_planner.is_complex_task(msg.content):
+            logger.info("Detected complex task, generating plan for session {}", key)
+
+            # Get available tool names
+            tool_names = [tool.name for tool in self.tools._tools.values() if hasattr(tool, 'name')]
+
+            # Generate plan
+            plan_steps = await task_planner.generate_plan(
+                msg.content,
+                self.provider,
+                tool_names
+            )
+
+            # Format and send plan message to user
+            plan_message = task_planner.format_plan_message(plan_steps)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=json.dumps({
+                    "type": "plan",
+                    "steps": [s["action"] for s in plan_steps],
+                    "tools": [s["tool"] for s in plan_steps],
+                    "formatted": plan_message
+                }),
+                metadata={"_tool_hint": True, **(msg.metadata or {})},
+            ))
+
+            # Store plan for completion summary
+            self._current_plan[key] = plan_steps
+
+            # Clear any existing tool results for this session
+            self._tool_results[key] = []
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -510,11 +993,69 @@ What can I help you with today?"""
             ))
 
         final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
+            session_key=key,
+            user_message=msg.content,
         )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        # Add completion summary if a plan was generated
+        if key in self._current_plan:
+            plan_steps = self._current_plan.pop(key)
+            tool_results = self._tool_results.pop(key, [])
+
+            # Generate completion summary
+            completion_summary = task_planner.format_completion_summary(
+                plan_steps,
+                tool_results
+            )
+
+            # Append summary to final content
+            final_content = f"{final_content}\n\n{completion_summary}"
+
+            logger.info("Added completion summary for plan with {} steps", len(plan_steps))
+
+        # Log task usage for dashboard
+        try:
+            duration = time.monotonic() - start_time
+
+            # Extract tools used from tool results
+            tools_used = []
+            if key in self._tool_results:
+                for result_dict in self._tool_results[key]:
+                    if isinstance(result_dict, dict) and "metadata" in result_dict:
+                        tool_name = result_dict["metadata"].get("tool")
+                        if tool_name:
+                            tools_used.append(tool_name)
+
+            # Remove duplicates while preserving order
+            tools_used = list(dict.fromkeys(tools_used))
+
+            # Determine success
+            success = True
+            error_msg = None
+
+            if final_content and final_content.startswith("❌"):
+                success = False
+                error_msg = final_content[:100]
+
+            # Check for fatal errors in tool results
+            if key in self._tool_results:
+                for result_dict in self._tool_results[key]:
+                    if isinstance(result_dict, dict) and "metadata" in result_dict:
+                        if result_dict["metadata"].get("fatal"):
+                            success = False
+                            if not error_msg:
+                                error_msg = result_dict.get("result", "Unknown error")[:100]
+                            break
+
+            self.usage_logger.log_task(msg.content, tools_used, success, error_msg, duration)
+
+        except Exception as e:
+            logger.warning(f"Failed to log task usage: {e}")
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
