@@ -15,6 +15,7 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
+from nanobot.memory import UserMemoryStore, MemoryExtractor
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -22,10 +23,15 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
+from nanobot.agent.tools.gmail_tool import GmailTool
+from nanobot.agent.tools.calendar_tool import CalendarTool
+from nanobot.agent.tools.browser_tool import BrowserTool
+from nanobot.agent.tools.notify_file import NotifyFileTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.helpers import get_user_workspace
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -45,12 +51,26 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    
+    # Welcome message for new users (first message in session)
+    WELCOME_INTRO = """Hey! 👋 I'm YourBot, your personal AI assistant.
+
+I can help you with:
+• 📧 Reading and sending emails (Gmail)
+• 📅 Managing your calendar events
+• 🔍 Searching the web for information
+• 📁 Creating and editing files
+• 💻 Running commands and automating tasks
+• 🧠 Remembering important things about you
+
+What can I help you with today?"""
 
     def __init__(
         self,
         bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
+        user_id: str = "default",
         model: str | None = None,
         max_iterations: int = 40,
         temperature: float = 0.1,
@@ -58,6 +78,7 @@ class AgentLoop:
         memory_window: int = 100,
         reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
+        serp_api_key: str | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
@@ -67,10 +88,14 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
+        # Resolve per-user workspace
+        workspace = get_user_workspace(workspace, user_id)
+        
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
+        self.user_id = user_id
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -78,6 +103,7 @@ class AgentLoop:
         self.memory_window = memory_window
         self.reasoning_effort = reasoning_effort
         self.brave_api_key = brave_api_key
+        self.serp_api_key = serp_api_key
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -95,6 +121,7 @@ class AgentLoop:
             max_tokens=self.max_tokens,
             reasoning_effort=reasoning_effort,
             brave_api_key=brave_api_key,
+            serp_api_key=serp_api_key,
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
@@ -110,6 +137,12 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+
+        # Semantic memory engine (per-user)
+        # Store in workspace.parent so chromadb is centralized but collections are per-user
+        self.semantic_memory = UserMemoryStore(user_id, workspace.parent)
+        self.memory_extractor = MemoryExtractor(provider, model=self.model)
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -123,12 +156,21 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
             path_append=self.exec_config.path_append,
         ))
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
+        self.tools.register(WebSearchTool(api_key=self.brave_api_key, serp_api_key=self.serp_api_key, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Action tools
+        self.tools.register(GmailTool(user_workspace=self.workspace))
+        self.tools.register(CalendarTool(user_workspace=self.workspace))
+        self.tools.register(BrowserTool(provider=self.provider))
+        self.tools.register(NotifyFileTool(
+            send_callback=self.bus.publish_outbound,
+            user_id=self.user_id,
+        ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -154,7 +196,7 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron"):
+        for name in ("message", "spawn", "cron", "notify_file"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
@@ -191,14 +233,19 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            tool_defs = self.tools.get_definitions()
+            logger.debug(f"Sending {len(tool_defs)} tools to LLM: {[t['function']['name'] for t in tool_defs]}")
+
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_defs,
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
             )
+
+            logger.debug(f"LLM response: finish_reason={response.finish_reason}, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, content_preview={str(response.content)[:100]}")
 
             if response.has_tool_calls:
                 if on_progress:
@@ -391,7 +438,7 @@ class AgentLoop:
                                   content="New session started.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
+                                  content="🤖 YourBot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
@@ -417,9 +464,39 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+
+        # First message in session - send welcome intro (use flag to prevent race condition)
+        if not session.metadata.get("_welcomed"):
+            session.metadata["_welcomed"] = True  # Set immediately to prevent duplicates
+            # Send welcome to user
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=self.WELCOME_INTRO,
+            ))
+            # Save welcome to history so LLM has context
+            session.add_message("assistant", self.WELCOME_INTRO)
+            self.sessions.save(session)
+            history = session.get_history(max_messages=self.memory_window)
+
+        # Search semantic memory for relevant context
+        semantic_context = ""
+        try:
+            memories = await self.semantic_memory.search(msg.content, top_k=5)
+            if memories:
+                memory_lines = [f"- {m['text']}" for m in memories if m.get('score', 0) > 0.3]
+                if memory_lines:
+                    semantic_context = "Relevant memories:\n" + "\n".join(memory_lines)
+        except Exception as e:
+            logger.warning("Semantic memory search failed: {}", e)
+
+        # Build message with semantic context prepended
+        current_message = msg.content
+        if semantic_context:
+            current_message = f"{semantic_context}\n\n{msg.content}"
+
         initial_messages = self.context.build_messages(
             history=history,
-            current_message=msg.content,
+            current_message=current_message,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
@@ -441,6 +518,15 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+
+        # Extract and save memories from this conversation turn
+        try:
+            conversation_turn = f"User: {msg.content}\nAgent: {final_content}"
+            extracted = await self.memory_extractor.extract(conversation_turn)
+            for mem in extracted:
+                await self.semantic_memory.save(mem["text"], category=mem["category"])
+        except Exception as e:
+            logger.warning("Memory extraction failed: {}", e)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

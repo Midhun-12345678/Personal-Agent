@@ -281,10 +281,25 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class GoogleOAuthConfig(Base):
+    """Google OAuth configuration for Gmail and Calendar."""
+
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = "http://localhost:8765/integrations/callback"
+
+
+class IntegrationsConfig(Base):
+    """Third-party integrations configuration."""
+
+    google: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
+
+
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
     api_key: str = ""  # Brave Search API key
+    serp_api_key: str | None = None  # SerpApi key (fallback if Brave not configured)
     max_results: int = 5
 
 
@@ -330,6 +345,8 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
+    auth_enabled: bool = True  # Toggle auth on/off (disable for local dev)
 
     @property
     def workspace_path(self) -> Path:

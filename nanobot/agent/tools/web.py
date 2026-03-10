@@ -45,7 +45,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using Brave Search API or SerpApi fallback."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -58,52 +58,169 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
+    def __init__(self, api_key: str | None = None, serp_api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
         self._init_api_key = api_key
+        self._init_serp_api_key = serp_api_key
         self.max_results = max_results
         self.proxy = proxy
 
     @property
     def api_key(self) -> str:
-        """Resolve API key at call time so env/config changes are picked up."""
+        """Resolve Brave API key at call time so env/config changes are picked up."""
         return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
 
-    async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return (
-                "Error: Brave Search API key not configured. Set it in "
-                "~/.nanobot/config.json under tools.web.search.apiKey "
-                "(or export BRAVE_API_KEY), then restart the gateway."
-            )
+    @property
+    def serp_api_key(self) -> str:
+        """Resolve SerpApi key at call time."""
+        return self._init_serp_api_key or os.environ.get("SERPAPI_KEY", "")
 
+    async def _search_brave(self, query: str, count: int) -> str:
+        """Search using Brave Search API."""
+        async with httpx.AsyncClient(proxy=self.proxy) as client:
+            r = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": count},
+                headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                timeout=10.0
+            )
+            r.raise_for_status()
+
+        results = r.json().get("web", {}).get("results", [])[:count]
+        return self._format_results(query, results, "title", "url", "description")
+
+    async def _search_serpapi(self, query: str, count: int) -> str:
+        """Search using SerpApi (Google) as fallback."""
+        params = {
+            "q": query,
+            "api_key": self.serp_api_key,
+            "num": count,
+            "engine": "google"
+        }
+        async with httpx.AsyncClient(proxy=self.proxy) as client:
+            r = await client.get(
+                "https://serpapi.com/search",
+                params=params,
+                timeout=10.0
+            )
+            logger.debug(f"SerpApi raw response status: {r.status_code}")
+            logger.debug(f"SerpApi raw response: {r.text[:500]}")
+            r.raise_for_status()
+
+        data = r.json()
+        # Try multiple possible keys for results
+        results = (
+            data.get("organic_results") or
+            data.get("results") or
+            data.get("web", {}).get("results") or
+            []
+        )[:count]
+        
+        # Log what keys are actually present
+        logger.debug(f"SerpApi response keys: {list(data.keys())}")
+        logger.debug(f"SerpApi results count: {len(results)}")
+        
+        if not results:
+            logger.warning(f"SerpApi returned no results. Full keys: {list(data.keys())}")
+            # Fallback to Google scraping
+            return await self._scrape_google(query, count)
+        
+        if len(results) < 2:
+            logger.warning(f"SerpApi returned only {len(results)} results, falling back to Google scrape")
+            scraped = await self._scrape_google(query, count)
+            if "No results" not in scraped:
+                return scraped
+        
+        # Log what's being returned to the LLM
+        formatted_preview = [{"title": r.get("title","")[:50], "url": r.get("link",""), "snippet": r.get("snippet","")[:80]} for r in results]
+        logger.debug(f"SerpApi returning {len(results)} results to LLM: {formatted_preview}")
+        
+        return self._format_results(query, results, "title", "link", "snippet")
+
+    async def _scrape_google(self, query: str, count: int) -> str:
+        """Fallback: scrape Google search results directly."""
+        import re
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
         try:
-            n = min(max(count or self.max_results, 1), 10)
-            logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                    "https://www.google.com/search",
+                    params={"q": query, "num": count * 2},
+                    headers=headers,
                     timeout=10.0
                 )
                 r.raise_for_status()
-
-            results = r.json().get("web", {}).get("results", [])[:n]
+            
+            html = r.text
+            results = []
+            
+            # Parse h3 tags and surrounding links
+            h3_pattern = r'<a[^>]+href="(/url\?q=|)(https?://[^"&]+)[^"]*"[^>]*>.*?<h3[^>]*>([^<]+)</h3>'
+            matches = re.findall(h3_pattern, html, re.DOTALL | re.IGNORECASE)
+            
+            for _, url, title in matches[:count]:
+                if url and not url.startswith("https://www.google.com"):
+                    results.append({"title": title.strip(), "link": url, "snippet": ""})
+            
             if not results:
-                return f"No results for: {query}"
-
-            lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results, 1):
-                lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
-                    lines.append(f"   {desc}")
-            return "\n".join(lines)
-        except httpx.ProxyError as e:
-            logger.error("WebSearch proxy error: {}", e)
-            return f"Proxy error: {e}"
+                logger.warning("Google scrape found no results")
+                return "Web search returned no results"
+            
+            logger.debug(f"Google scrape returning {len(results)} results")
+            return self._format_results(query, results, "title", "link", "snippet")
+            
         except Exception as e:
-            logger.error("WebSearch error: {}", e)
-            return f"Error: {e}"
+            logger.error(f"Google scrape failed: {e}")
+            return "Web search returned no results"
+
+    def _format_results(self, query: str, results: list, title_key: str, url_key: str, desc_key: str) -> str:
+        """Format search results into readable text."""
+        if not results:
+            return f"No results for: {query}"
+
+        lines = [f"Results for: {query}\n"]
+        for i, item in enumerate(results, 1):
+            lines.append(f"{i}. {item.get(title_key, '')}\n   {item.get(url_key, '')}")
+            if desc := item.get(desc_key):
+                lines.append(f"   {desc}")
+        return "\n".join(lines)
+
+    async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        n = min(max(count or self.max_results, 1), 10)
+        logger.debug(f"web_search called with query={query}, brave_key_present={bool(self.api_key)}, serp_api_key_present={bool(self.serp_api_key)}")
+        logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
+
+        # Try Brave first
+        if self.api_key:
+            try:
+                return await self._search_brave(query, n)
+            except httpx.ProxyError as e:
+                logger.error("WebSearch Brave proxy error: {}", e)
+                return f"Proxy error: {e}"
+            except Exception as e:
+                logger.error("WebSearch Brave error: {}", e)
+                # Fall through to SerpApi if available
+                if not self.serp_api_key:
+                    return f"Error: {e}"
+
+        # Fallback to SerpApi
+        if self.serp_api_key:
+            try:
+                return await self._search_serpapi(query, n)
+            except httpx.ProxyError as e:
+                logger.error("WebSearch SerpApi proxy error: {}", e)
+                return f"Proxy error: {e}"
+            except Exception as e:
+                logger.error("WebSearch SerpApi error: {}", e)
+                return f"Error: {e}"
+
+        return (
+            "Error: No search API configured. Set either:\n"
+            "- tools.web.search.apiKey (Brave Search)\n"
+            "- tools.web.search.serpApiKey (SerpApi/Google)\n"
+            "in ~/.personal-agent/config.json, then restart."
+        )
 
 
 class WebFetchTool(Tool):

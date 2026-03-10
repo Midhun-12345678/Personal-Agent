@@ -1,6 +1,6 @@
 """
-nanobot - A lightweight AI agent framework
+Personal Agent - An autonomous personal life assistant
 """
 
-__version__ = "0.1.4.post3"
-__logo__ = "🐈"
+__version__ = "0.1.0"
+__logo__ = ""

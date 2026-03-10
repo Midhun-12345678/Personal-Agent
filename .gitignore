@@ -3,6 +3,10 @@
 env/
 *.pyc
 dist/
+node_modules/
+.next/
+.env.local
+.env.development.local
 build/
 docs/
 *.egg-info/

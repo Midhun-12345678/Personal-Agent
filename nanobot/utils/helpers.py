@@ -22,6 +22,16 @@ def get_workspace_path(workspace: str | None = None) -> Path:
     return ensure_dir(path)
 
 
+def get_user_workspace(base_workspace: Path, user_id: str) -> Path:
+    """Returns an isolated workspace path for a specific user. Creates it if it doesn't exist."""
+    safe_id = "".join(c for c in user_id if c.isalnum() or c in "-_")
+    if not safe_id:
+        safe_id = "default"
+    user_ws = base_workspace / "users" / safe_id
+    user_ws.mkdir(parents=True, exist_ok=True)
+    return user_ws
+
+
 def timestamp() -> str:
     """Current ISO timestamp."""
     return datetime.now().isoformat()
