@@ -33,16 +33,33 @@ def get_workspace_path() -> Path:
     return Path(workspace_base) / "workspace"
 
 
+def get_example_config_path() -> Path:
+    """Get the example config file path (in repo root)."""
+    return Path(__file__).parent.parent / "config.example.json"
+
+
 def load_config(config_path: Path | None = None) -> dict:
-    """Load configuration from JSON file."""
-    path = config_path or get_config_path()
+    """Load configuration from JSON file.
     
-    if not path.exists():
-        logger.warning(f"Config file not found at {path}, using defaults")
+    Priority: config.json → config.example.json → env overrides
+    """
+    path = config_path or get_config_path()
+    example_path = get_example_config_path()
+    
+    # Try config.json first, then fall back to config.example.json
+    config_file = None
+    if path.exists():
+        config_file = path
+    elif example_path.exists():
+        config_file = example_path
+        logger.info(f"Using example config from {example_path}")
+    
+    if not config_file:
+        logger.warning(f"No config file found, using defaults with env overrides")
         return apply_env_overrides({})
     
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(config_file, encoding="utf-8") as f:
             config = json.load(f)
         return apply_env_overrides(config)
     except (json.JSONDecodeError, IOError) as e:

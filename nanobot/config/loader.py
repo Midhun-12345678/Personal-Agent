@@ -12,6 +12,11 @@ def get_config_path() -> Path:
     return Path.home() / ".nanobot" / "config.json"
 
 
+def get_example_config_path() -> Path:
+    """Get the example config file path (in repo root)."""
+    return Path(__file__).parent.parent.parent / "config.example.json"
+
+
 def get_data_dir() -> Path:
     """Get the nanobot data directory."""
     from nanobot.utils.helpers import get_data_path
@@ -21,6 +26,8 @@ def get_data_dir() -> Path:
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.
+    
+    Priority: config.json → config.example.json → defaults → env overrides
 
     Args:
         config_path: Optional path to config file. Uses default if not provided.
@@ -29,16 +36,25 @@ def load_config(config_path: Path | None = None) -> Config:
         Loaded configuration object.
     """
     path = config_path or get_config_path()
+    example_path = get_example_config_path()
 
+    # Try config.json first, then fall back to config.example.json
+    config_file = None
     if path.exists():
+        config_file = path
+    elif example_path.exists():
+        config_file = example_path
+        print(f"Using example config from {example_path}")
+
+    if config_file:
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(config_file, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
             data = apply_env_overrides(data)
             return Config.model_validate(data)
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to load config from {path}: {e}")
+            print(f"Warning: Failed to load config from {config_file}: {e}")
             print("Using default configuration.")
 
     # Apply env overrides even for default config
