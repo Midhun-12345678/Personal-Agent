@@ -115,6 +115,10 @@ def apply_env_overrides(config: dict) -> dict:
     if os.getenv("OPENAI_API_KEY"):
         config.setdefault("providers", {}).setdefault("openai", {})["apiKey"] = os.getenv("OPENAI_API_KEY")
     
+    # Override Anthropic API key
+    if os.getenv("ANTHROPIC_API_KEY"):
+        config.setdefault("providers", {}).setdefault("anthropic", {})["apiKey"] = os.getenv("ANTHROPIC_API_KEY")
+    
     # Override Google OAuth settings
     if os.getenv("GOOGLE_CLIENT_ID"):
         config.setdefault("integrations", {}).setdefault("google", {})["clientId"] = os.getenv("GOOGLE_CLIENT_ID")
