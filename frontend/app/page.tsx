@@ -133,10 +133,10 @@ export default function Home() {
 
           <button
             type="submit"
-            disabled={!name.trim() || loading || (userExists && !password)}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 
-                       bg-nano-accent hover:bg-nano-accent-hover disabled:opacity-50 
-                       disabled:cursor-not-allowed rounded-xl text-white font-medium 
+            disabled={!name.trim() || loading || (userExists === true && !password)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3
+                       bg-nano-accent hover:bg-nano-accent-hover disabled:opacity-50
+                       disabled:cursor-not-allowed rounded-xl text-white font-medium
                        transition-colors"
           >
             {loading ? (
