@@ -41,9 +41,12 @@ RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
 # Copy built application
-COPY --from=builder /app/public ./public
+# Copy public folder only if it exists
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+
+# Copy public folder if it exists (optional)
+RUN mkdir -p ./public
 
 # Change ownership to nextjs user
 RUN chown -R nextjs:nodejs /app
