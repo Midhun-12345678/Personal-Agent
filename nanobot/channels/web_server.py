@@ -90,8 +90,8 @@ class WebServer:
             version="0.1.0"
         )
 
-        # Configure CORS
-        origins = cors_origins or ["http://localhost:3000", "http://127.0.0.1:3000"]
+        # Configure CORS - allow all origins for cross-domain deployment
+        origins = cors_origins or ["*"]
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
