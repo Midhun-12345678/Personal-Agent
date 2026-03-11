@@ -12,6 +12,7 @@ from typing import Callable, Awaitable
 from loguru import logger
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.config.loader import apply_env_overrides
 from nanobot.auth.middleware import AuthManager
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.web_server import WebServer
@@ -38,14 +39,15 @@ def load_config(config_path: Path | None = None) -> dict:
     
     if not path.exists():
         logger.warning(f"Config file not found at {path}, using defaults")
-        return {}
+        return apply_env_overrides({})
     
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+        return apply_env_overrides(config)
     except (json.JSONDecodeError, IOError) as e:
         logger.error(f"Failed to load config: {e}")
-        return {}
+        return apply_env_overrides({})
 
 
 class Application:
