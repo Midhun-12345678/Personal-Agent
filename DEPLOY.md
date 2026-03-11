@@ -2,6 +2,33 @@
 
 This guide covers deploying Nanobot (backend + frontend) to Railway's free tier for public access.
 
+## ⚠️ Railway Free Tier Limitations
+
+**Important:** The Railway free tier has a **4GB Docker image size limit**. To fit within this limit, the following features are **DISABLED** in Railway deployments:
+
+- ❌ **Semantic Memory** (ChromaDB + sentence-transformers) - Requires ~2GB
+- ❌ **Browser Automation** (Playwright + Chromium) - Requires ~1.5GB
+- ❌ **Advanced Messaging** (Telegram, Slack bots)
+
+**What WORKS on Railway free tier:**
+- ✅ Core AI agent with LiteLLM (Anthropic, OpenAI, Groq, all providers)
+- ✅ Gmail & Calendar integration (full OAuth support)
+- ✅ Web search (Brave API)
+- ✅ File operations (read, write, edit)
+- ✅ Shell commands
+- ✅ Task planning & error recovery
+- ✅ Usage dashboard
+- ✅ Real-time tool visibility
+- ✅ Next.js frontend with WebSockets
+
+**For full features (semantic memory + browser automation):**
+1. **Upgrade to Railway Pro** ($20/month, 8GB image limit)
+2. **Deploy to Render.com** (free tier: 7GB limit)
+3. **Deploy to your own VPS** with Docker
+4. **Run locally:** `docker-compose up` (all features enabled)
+
+---
+
 ## Prerequisites
 
 - A Railway account (free tier available)

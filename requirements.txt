@@ -12,11 +12,9 @@ readability-lxml>=0.8.4,<1.0.0
 rich>=14.0.0,<15.0.0
 croniter>=6.0.0,<7.0.0
 
-# Messaging platforms (optional - comment out if not using)
-python-telegram-bot[socks]>=22.0,<23.0
+# Minimal messaging - only SocketIO for basic web support
 python-socketio>=5.16.0,<6.0.0
 msgpack>=1.1.0,<2.0.0
-slack-sdk>=3.39.0,<4.0.0
 
 # CLI and dev tools
 prompt-toolkit>=3.0.50,<4.0.0
@@ -27,22 +25,22 @@ json-repair>=0.57.0,<1.0.0
 fastapi>=0.115.0,<1.0.0
 uvicorn[standard]>=0.32.0,<1.0.0
 
-# AI and ML - CPU-only versions (much smaller)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-sentence-transformers>=2.2.0,<3.0.0
-chromadb>=0.4.0,<1.0.0
-
 # Google integrations
 google-api-python-client>=2.100.0,<3.0.0
 google-auth-httplib2>=0.2.0,<1.0.0
 google-auth-oauthlib>=1.0.0,<2.0.0
-
-# Browser automation
-playwright>=1.40.0,<2.0.0
 
 # Auth and security
 bcrypt>=4.0.0
 passlib>=1.7.0
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.6
+
+# NOTE: ChromaDB, sentence-transformers, and Playwright are DISABLED for Railway free tier
+# To enable semantic memory and browser automation, deploy to a paid tier or use Docker locally
+# Uncomment below for full features (requires 8GB+ image):
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0.0
+# sentence-transformers>=2.2.0,<3.0.0
+# chromadb>=0.4.0,<1.0.0
+# playwright>=1.40.0,<2.0.0

@@ -15,12 +15,9 @@ RUN pip install --no-cache-dir --target=/app/python-packages -r requirements.txt
 # Final stage - minimal runtime image
 FROM python:3.11-slim
 
-# Install only runtime dependencies for Playwright
+# Minimal runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
-    libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 \
-    libasound2 libpangocairo-1.0-0 libgtk-3-0 libx11-xcb1 \
-    fonts-liberation ca-certificates \
+    ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -28,12 +25,6 @@ WORKDIR /app
 
 # Copy Python packages from builder
 COPY --from=builder /app/python-packages /usr/local/lib/python3.11/site-packages/
-
-# Install Playwright browser and clean up cache aggressively
-RUN playwright install chromium --with-deps && \
-    rm -rf /root/.cache/ms-playwright/*.zip && \
-    rm -rf /tmp/* && \
-    find /root/.cache/ms-playwright -type f -name "*.zip" -delete
 
 # Copy application code
 COPY . .
@@ -52,6 +43,7 @@ EXPOSE 8765
 
 ENV PYTHONUNBUFFERED=1
 ENV NANOBOT_WORKSPACE=/app/.personal-agent
+ENV RAILWAY_DEPLOYMENT=true
 
 CMD ["python", "run.py"]
 
