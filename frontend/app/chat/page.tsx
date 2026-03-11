@@ -81,12 +81,18 @@ export default function ChatPage() {
   const { sendMessage, isConnected, activeToolCall, completedTools, currentPlan } = useWebSocket({
     token: token || '',
     onMessage: (data) => {
-      if (data.type === 'response' || data.type === 'message' || data.type === 'file') {
+      // Handle all message-like types: response, message, text, file
+      const isMessageType = data.type === 'response' || data.type === 'message' || data.type === 'file' || data.type === 'text'
+      // Also handle unknown types that have content
+      const hasContent = data.content || data.message
+      const isKnownNonMessage = data.type === 'typing' || data.type === 'error' || data.type === 'ping' || data.type === 'tool_start' || data.type === 'tool_done' || data.type === 'plan'
+      
+      if (isMessageType || (hasContent && !isKnownNonMessage)) {
         setIsTyping(false)
         const assistantMessage: Message = {
           id: crypto.randomUUID(),
           role: 'assistant',
-          content: data.content,
+          content: data.content || data.message,
           timestamp: new Date(),
           type: data.type,
           filename: data.filename,

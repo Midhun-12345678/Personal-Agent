@@ -101,12 +101,20 @@ export function useWebSocket({ token, onMessage, onError }: UseWebSocketOptions)
             formatted: planData.formatted
           }
           setCurrentPlan(planEvent)
-        } else if (data.type === 'response' || data.type === 'message') {
+        } else if (data.type === 'response' || data.type === 'message' || data.type === 'text') {
           console.log('Message received, clearing tool state')
           // New turn starting - clear all tool state
           setActiveToolCall(null)
           setCompletedTools([])
           setCurrentPlan(null)
+        } else if (data.type !== 'typing' && data.type !== 'error') {
+          // Unknown type but has content - treat as message
+          if (data.content || data.message) {
+            console.log('Unknown message type with content:', data.type)
+            setActiveToolCall(null)
+            setCompletedTools([])
+            setCurrentPlan(null)
+          }
         }
 
         // Pass to original handler
