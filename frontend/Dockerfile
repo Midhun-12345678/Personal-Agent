@@ -20,9 +20,12 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy source code
 COPY . .
 
-# Accept build arg for API URL (used during build for SSR)
-ARG NEXT_PUBLIC_API_URL=http://backend:8765
+# Accept build args for API URLs (MUST be set at build time for Next.js)
+ARG NEXT_PUBLIC_API_URL=http://localhost:8765
+ARG NEXT_PUBLIC_WS_URL=ws://localhost:8765
+
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 
 # Build the application
 RUN npm run build
@@ -40,16 +43,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy built application
-# Copy public folder only if it exists
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+# Copy built application from standalone output
+# Next.js standalone mode puts everything in .next/standalone
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Copy public folder if it exists (optional)
-RUN mkdir -p ./public
-
-# Change ownership to nextjs user
-RUN chown -R nextjs:nodejs /app
+# Create public directory
+RUN mkdir -p ./public && chown nextjs:nodejs ./public
 
 USER nextjs
 
@@ -58,4 +58,5 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
+# The standalone server.js is in the root after copying
 CMD ["node", "server.js"]
