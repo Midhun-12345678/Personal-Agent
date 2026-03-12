@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Bot, ArrowRight, Lock, User } from 'lucide-react'
 import { registerUser, loginUser, checkUserExists } from '@/lib/api'
+import { ColdStartBanner } from '@/components/ColdStartBanner'
 
 export default function Home() {
   const [name, setName] = useState('')
@@ -72,6 +73,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen flex items-center justify-center p-4">
+      <ColdStartBanner />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-nano-accent/20 mb-4">
