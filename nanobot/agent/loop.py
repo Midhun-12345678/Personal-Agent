@@ -72,6 +72,23 @@ I can help you with:
 
 What can I help you with today?"""
 
+    def _clean_message_history(self, messages: list[dict]) -> list[dict]:
+        """Remove orphaned tool messages that have no preceding tool_calls.
+        
+        This fixes corrupted session history where a 'tool' role message
+        exists without a preceding assistant message with 'tool_calls'.
+        """
+        cleaned = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                # Check if previous message has tool_calls
+                prev = cleaned[-1] if cleaned else None
+                if not prev or prev.get("role") != "assistant" or not prev.get("tool_calls"):
+                    # Orphaned tool message — skip it
+                    continue
+            cleaned.append(msg)
+        return cleaned
+
     def __init__(
         self,
         bus: MessageBus,
@@ -633,7 +650,7 @@ What can I help you with today?"""
                         self.sessions.save(session)
 
                         # Clear the pending confirmation
-                        del self._pending_confirmations[session_key]
+                        self._pending_confirmations.pop(session_key, None)
 
                         # Send the auto-confirmation notification + result
                         await self.bus.publish_outbound(OutboundMessage(
@@ -674,7 +691,7 @@ What can I help you with today?"""
                         self.sessions.save(session)
 
                         # Clear the pending confirmation
-                        del self._pending_confirmations[session_key]
+                        self._pending_confirmations.pop(session_key, None)
 
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
@@ -688,7 +705,7 @@ What can I help you with today?"""
                         logger.info("User cancelled action for session {}", session_key)
 
                         # Clear the pending confirmation
-                        del self._pending_confirmations[session_key]
+                        self._pending_confirmations.pop(session_key, None)
 
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
@@ -806,8 +823,7 @@ What can I help you with today?"""
 
                         finally:
                             # Clear the pending confirmation
-                            if session_key in self._pending_confirmations:
-                                del self._pending_confirmations[session_key]
+                            self._pending_confirmations.pop(session_key, None)
 
             except asyncio.CancelledError:
                 logger.info("Expired confirmations check task cancelled")
@@ -836,6 +852,7 @@ What can I help you with today?"""
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
+            history = self._clean_message_history(history)
             messages = await self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
@@ -925,6 +942,9 @@ What can I help you with today?"""
             session.add_message("assistant", self.WELCOME_INTRO)
             self.sessions.save(session)
             history = session.get_history(max_messages=self.memory_window)
+
+        # Clean history to remove orphaned tool messages
+        history = self._clean_message_history(history)
 
         # Search semantic memory for relevant context
         semantic_context = ""
