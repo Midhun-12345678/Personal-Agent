@@ -13,6 +13,7 @@ export default function Home() {
   const [error, setError] = useState('')
   const [userExists, setUserExists] = useState<boolean | null>(null)
   const [checkingUser, setCheckingUser] = useState(false)
+  const [showColdStart, setShowColdStart] = useState(false)
   const router = useRouter()
 
   // Check if user exists when name changes (debounced)
@@ -66,6 +67,10 @@ export default function Home() {
       localStorage.setItem('nanobot_name', name.trim())
       router.push('/chat')
     } catch (err: any) {
+      // Show cold start banner on fetch failures (likely server sleeping)
+      if (err.message?.includes('fetch') || err.message?.includes('Failed') || err.message?.includes('network')) {
+        setShowColdStart(true)
+      }
       setError(err.message || 'Failed to connect. Make sure the backend is running.')
       setLoading(false)
     }
@@ -73,7 +78,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen flex items-center justify-center p-4">
-      <ColdStartBanner />
+      <ColdStartBanner show={showColdStart} onDismiss={() => setShowColdStart(false)} />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-nano-accent/20 mb-4">

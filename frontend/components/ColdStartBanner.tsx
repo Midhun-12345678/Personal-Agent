@@ -3,37 +3,33 @@
 import { useState, useEffect } from 'react'
 import { AlertTriangle, X, Server } from 'lucide-react'
 
-export function ColdStartBanner() {
-  const [showModal, setShowModal] = useState(false)
-  const [countdown, setCountdown] = useState(50)
-  const [dismissed, setDismissed] = useState(false)
+interface ColdStartBannerProps {
+  show: boolean
+  onDismiss: () => void
+}
 
+export function ColdStartBanner({ show, onDismiss }: ColdStartBannerProps) {
+  const [countdown, setCountdown] = useState(50)
+
+  // Reset countdown when shown
   useEffect(() => {
-    // Check if user has already dismissed this session
-    const hasDismissed = sessionStorage.getItem('coldstart_dismissed')
-    if (!hasDismissed) {
-      setShowModal(true)
+    if (show) {
+      setCountdown(50)
     }
-  }, [])
+  }, [show])
 
   // Countdown timer
   useEffect(() => {
-    if (!showModal || countdown <= 0) return
+    if (!show || countdown <= 0) return
     
     const timer = setInterval(() => {
       setCountdown(prev => prev - 1)
     }, 1000)
     
     return () => clearInterval(timer)
-  }, [showModal, countdown])
+  }, [show, countdown])
 
-  const handleDismiss = () => {
-    setShowModal(false)
-    setDismissed(true)
-    sessionStorage.setItem('coldstart_dismissed', 'true')
-  }
-
-  if (!showModal || dismissed) return null
+  if (!show) return null
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -47,7 +43,7 @@ export function ColdStartBanner() {
             </h2>
           </div>
           <button 
-            onClick={handleDismiss}
+            onClick={onDismiss}
             className="p-1 hover:bg-nano-border rounded-lg transition-colors"
           >
             <X className="w-5 h-5 text-nano-muted" />
@@ -89,7 +85,7 @@ export function ColdStartBanner() {
 
         {/* Footer Button */}
         <button
-          onClick={handleDismiss}
+          onClick={onDismiss}
           className="w-full px-4 py-3 bg-nano-accent hover:bg-nano-accent-hover 
                      rounded-xl text-white font-medium transition-colors"
         >
