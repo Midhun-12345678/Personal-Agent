@@ -73,20 +73,47 @@ I can help you with:
 What can I help you with today?"""
 
     def _clean_message_history(self, messages: list[dict]) -> list[dict]:
-        """Remove orphaned tool messages that have no preceding tool_calls.
+        """Remove orphaned tool messages that break OpenAI message format."""
+        if not messages:
+            return messages
         
-        This fixes corrupted session history where a 'tool' role message
-        exists without a preceding assistant message with 'tool_calls'.
-        """
         cleaned = []
-        for msg in messages:
-            if msg.get("role") == "tool":
-                # Check if previous message has tool_calls
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            
+            # Case 1: assistant message with tool_calls
+            # Check if ALL tool_call_ids have matching tool responses after it
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tool_call_ids = {tc["id"] for tc in msg["tool_calls"]}
+                # Look ahead for matching tool responses
+                following_tool_ids = set()
+                j = i + 1
+                while j < len(messages) and messages[j].get("role") == "tool":
+                    following_tool_ids.add(messages[j].get("tool_call_id"))
+                    j += 1
+                
+                if tool_call_ids.issubset(following_tool_ids):
+                    # All tool calls have responses — keep this and following tools
+                    cleaned.append(msg)
+                else:
+                    # Incomplete tool call chain — skip this assistant msg 
+                    # and skip any following tool messages
+                    while i + 1 < len(messages) and messages[i+1].get("role") == "tool":
+                        i += 1
+                    i += 1
+                    continue
+            
+            # Case 2: tool message with no preceding assistant tool_calls
+            elif msg.get("role") == "tool":
                 prev = cleaned[-1] if cleaned else None
                 if not prev or prev.get("role") != "assistant" or not prev.get("tool_calls"):
-                    # Orphaned tool message — skip it
+                    i += 1
                     continue
+            
             cleaned.append(msg)
+            i += 1
+        
         return cleaned
 
     def __init__(
@@ -961,6 +988,9 @@ What can I help you with today?"""
         current_message = msg.content
         if semantic_context:
             current_message = f"{semantic_context}\n\n{msg.content}"
+
+        # Ensure history is cleaned immediately before building messages
+        history = self._clean_message_history(history)
 
         initial_messages = await self.context.build_messages(
             history=history,
