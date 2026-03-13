@@ -320,6 +320,23 @@ class WebServer:
                 media_type="application/octet-stream"
             )
 
+        @self.app.delete("/session/{token}")
+        async def clear_session(token: str):
+            """Nuclear: clear a user's session JSONL file."""
+            user_ctx = self._auth_manager.authenticate(token)
+            if not user_ctx:
+                raise HTTPException(status_code=401, detail="Invalid token")
+
+            session_file = self.workspace / "users" / user_ctx.user_id / "session.jsonl"
+            try:
+                if session_file.exists():
+                    session_file.unlink()
+            except Exception as e:
+                logger.warning("Failed to clear session file for user %s: %s", user_ctx.user_id, e)
+                raise HTTPException(status_code=500, detail="Failed to clear session file")
+
+            return {"cleared": True}
+
         # ------------------------------------------------------------------
         # Usage Dashboard Routes
         # ------------------------------------------------------------------

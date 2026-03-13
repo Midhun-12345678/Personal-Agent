@@ -359,8 +359,12 @@ What can I help you with today?"""
             tool_defs = self.tools.get_definitions()
             logger.debug(f"Sending {len(tool_defs)} tools to LLM: {[t['function']['name'] for t in tool_defs]}")
 
+            # Clean messages immediately before sending to the LLM to avoid
+            # sending orphaned or corrupted tool messages that cause 400s.
+            messages_to_send = self._clean_message_history(messages)
+
             response = await self.provider.chat(
-                messages=messages,
+                messages=messages_to_send,
                 tools=tool_defs,
                 model=self.model,
                 temperature=self.temperature,
@@ -663,6 +667,16 @@ What can I help you with today?"""
 
                         # Continue the agent loop
                         session = self.sessions.get_or_create(session_key)
+                        # Clean persisted session messages on load and persist if changed
+                        try:
+                            if session.messages:
+                                cleaned = self._clean_message_history(session.messages)
+                                if cleaned != session.messages:
+                                    session.messages = cleaned
+                                    session.metadata.setdefault("_cleaned_on_load", True)
+                                    self.sessions.save(session)
+                        except Exception as e:
+                            logger.warning("Failed to clean/persist session on load {}: {}", session.key, e)
                         final_content, _, all_msgs = await self._run_agent_loop(
                             messages,
                             on_progress=self._make_bus_progress(msg),
@@ -704,6 +718,16 @@ What can I help you with today?"""
 
                         # Continue the agent loop
                         session = self.sessions.get_or_create(session_key)
+                        # Clean persisted session messages on load and persist if changed
+                        try:
+                            if session.messages:
+                                cleaned = self._clean_message_history(session.messages)
+                                if cleaned != session.messages:
+                                    session.messages = cleaned
+                                    session.metadata.setdefault("_cleaned_on_load", True)
+                                    self.sessions.save(session)
+                        except Exception as e:
+                            logger.warning("Failed to clean/persist session on load {}: {}", session.key, e)
                         final_content, _, all_msgs = await self._run_agent_loop(
                             messages,
                             on_progress=self._make_bus_progress(msg),
@@ -817,6 +841,16 @@ What can I help you with today?"""
 
                             # Continue the agent loop
                             session = self.sessions.get_or_create(session_key)
+                            # Clean persisted session messages on load and persist if changed
+                            try:
+                                if session.messages:
+                                    cleaned = self._clean_message_history(session.messages)
+                                    if cleaned != session.messages:
+                                        session.messages = cleaned
+                                        session.metadata.setdefault("_cleaned_on_load", True)
+                                        self.sessions.save(session)
+                            except Exception as e:
+                                logger.warning("Failed to clean/persist session on load {}: {}", session.key, e)
                             final_content, _, all_msgs = await self._run_agent_loop(
                                 messages,
                                 session_key=session_key,
@@ -877,6 +911,16 @@ What can I help you with today?"""
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
+            # Clean persisted session messages on load and persist if changed
+            try:
+                if session.messages:
+                    cleaned = self._clean_message_history(session.messages)
+                    if cleaned != session.messages:
+                        session.messages = cleaned
+                        session.metadata.setdefault("_cleaned_on_load", True)
+                        self.sessions.save(session)
+            except Exception as e:
+                logger.warning("Failed to clean/persist session on load {}: {}", session.key if session else key, e)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
             history = self._clean_message_history(history)

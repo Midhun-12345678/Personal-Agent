@@ -2,6 +2,7 @@
 .env
 config.json
 env/
+env/
 *.pyc
 dist/
 node_modules/
