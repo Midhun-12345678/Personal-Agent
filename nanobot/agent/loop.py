@@ -73,17 +73,25 @@ I can help you with:
 What can I help you with today?"""
 
     def _clean_message_history(self, messages: list[dict]) -> list[dict]:
-        """Remove orphaned tool messages (tool messages without preceding assistant tool_calls)."""
+        """Remove orphaned tool messages (tool messages without a matching preceding assistant tool_call)."""
         if not messages:
             return messages
         
         cleaned = []
         for msg in messages:
-            # Skip tool messages that don't have a preceding assistant with tool_calls
+            # For tool messages, verify there's a preceding assistant with matching tool_call_id
             if msg.get("role") == "tool":
-                prev = cleaned[-1] if cleaned else None
-                if not prev or prev.get("role") != "assistant" or not prev.get("tool_calls"):
-                    continue  # Skip this orphaned tool message
+                tool_call_id = msg.get("tool_call_id")
+                # Search backwards for matching tool_call in an assistant message
+                found = False
+                for prev_msg in reversed(cleaned):
+                    if prev_msg.get("role") == "assistant":
+                        tool_calls = prev_msg.get("tool_calls", [])
+                        if any(tc.get("id") == tool_call_id for tc in tool_calls):
+                            found = True
+                            break
+                if not found:
+                    continue  # Skip orphaned tool message
             cleaned.append(msg)
         
         return cleaned
