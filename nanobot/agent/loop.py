@@ -359,9 +359,7 @@ What can I help you with today?"""
             tool_defs = self.tools.get_definitions()
             logger.debug(f"Sending {len(tool_defs)} tools to LLM: {[t['function']['name'] for t in tool_defs]}")
 
-            # Clean messages immediately before sending to the LLM to avoid
-            # sending orphaned or corrupted tool messages that cause 400s.
-            messages_to_send = self._clean_message_history(messages)
+            messages_to_send = messages
 
             response = await self.provider.chat(
                 messages=messages_to_send,
