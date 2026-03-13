@@ -420,7 +420,7 @@ What can I help you with today?"""
                                 tool_name=tool_call.name,
                                 tool_args=tool_call.arguments,
                                 tool_call=tool_call,
-                                messages=messages,
+                                messages=initial_messages,
                                 iteration=iteration,
                                 tools_used=tools_used,
                                 auto_confirm_seconds=30,
