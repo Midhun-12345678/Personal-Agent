@@ -212,7 +212,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         tool_call_id: str, tool_name: str, result: str,
     ) -> list[dict[str, Any]]:
         """Add a tool result to the message list."""
-        messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
         return messages
 
     def add_assistant_message(
